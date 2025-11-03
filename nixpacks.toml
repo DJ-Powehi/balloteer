@@ -1,11 +1,17 @@
 [phases.setup]
 nixPkgs = ["nodejs_22"]
+aptPkgs = []
 
 [phases.install]
-cmds = ["cd backend/tg_bot && npm install --production"]
+dependsOn = ["setup"]
+cmds = [
+  "cd backend/tg_bot",
+  "npm install --production"
+]
 
 [phases.build]
-cmds = ["echo 'No build step needed'"]
+dependsOn = ["install"]
+cmds = ["echo 'No build needed for bot'"]
 
 [start]
 cmd = "cd backend/tg_bot && npm start"
