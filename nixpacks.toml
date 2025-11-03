@@ -2,7 +2,7 @@
 nixPkgs = ["nodejs_22"]
 
 [phases.install]
-cmds = ["cd backend/tg_bot && npm ci"]
+cmds = ["cd backend/tg_bot && npm install --production"]
 
 [phases.build]
 cmds = ["echo 'No build step needed'"]
