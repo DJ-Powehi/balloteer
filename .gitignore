@@ -32,6 +32,9 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
+backend/tg_bot/.env
+backend/tg_bot/.env.*
 
 # vercel
 .vercel
@@ -39,3 +42,14 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# backend node_modules
+backend/tg_bot/node_modules/
+
+# database files (if using SQLite locally)
+*.db
+*.sqlite
+*.sqlite3
+
+# ngrok/tunnel configs
+TUNNEL.text
