@@ -2,7 +2,7 @@
 const { InlineKeyboard } = require("grammy");
 const crypto = require("crypto");
 const bot = require("./bot");
-const { PUBLIC_URL } = require("./config");
+const { FRONTEND_URL } = require("./config");
 const { pendingWalletStates } = require("./state");
 const { getWallet } = require("./db");
 const { isPrivateChat } = require("./utils");
@@ -52,8 +52,8 @@ function registerConnectCommand() {
       createdAt: Date.now(),
     });
 
-    // Build URL to Next.js onboard page
-    const webAppUrl = PUBLIC_URL || 'https://kylan-untranscendental-victoriously.ngrok-free.dev';
+    // Build URL to Next.js onboard page (on Vercel frontend)
+    const webAppUrl = FRONTEND_URL || 'https://balloteer.xyz';
     const url = `${webAppUrl}/onboard?state=${state}`;
     
     const keyboard = new InlineKeyboard()
