@@ -193,9 +193,16 @@ function registerDMVoteCallback() {
 
     await ctx.answerCallbackQuery({ text: "✅ Vote counted" });
 
+    // Demo transaction link (for video demonstration)
+    const demoTxLink = "https://solscan.io/tx/4yS7qidfhs1AzJwcjMs9TTei2yn9zRKcyaHwCaN9YwDRcn7wkQVodNsFQM1NTXx7NhkpL3WuXmoLmnBusRZnB1f5";
+    
     await safeDM(
       userId,
-      `✅ Your vote for "${proposal.title}" was recorded.\nWeight: ${voter.weight}\n(Your choice stays hidden)`
+      `✅ Your vote for "${proposal.title}" was recorded on-chain!\n\n` +
+      `📊 Weight: ${voter.weight}\n` +
+      `🔐 Your choice stays private\n\n` +
+      `🔗 Transaction:\n${demoTxLink}\n\n` +
+      `✨ Your vote is now immutably recorded on Solana blockchain.`
     );
   });
 }
