@@ -1,0 +1,12 @@
+[phases.setup]
+nixPkgs = ["nodejs-22_x"]
+
+[phases.install]
+cmds = ["cd backend/tg_bot && npm ci"]
+
+[phases.build]
+cmds = ["echo 'No build step needed'"]
+
+[start]
+cmd = "cd backend/tg_bot && npm start"
+
