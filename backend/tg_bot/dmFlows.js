@@ -1,81 +1,78 @@
 // backend/dmFlows.js
+// Handles DM conversations for proposal creation and weight management
 const bot = require("./bot");
 const {
   pendingCustomWeight,
   pendingSetWeight,
   draftProposal,
-  adminsCommunities,
-  communities,
 } = require("./state");
-const {
-  isPrivateChat,
-} = require("./utils");
-const {
-  isAdmin,
-} = require("./community");
+const { isPrivateChat } = require("./utils");
 const { InlineKeyboard } = require("grammy");
+const {
+  getCommunity,
+  getAllCommunitiesForAdmin,
+  getVoter,
+  approveVoter,
+  setVoterWeight,
+  getApprovedVotersInCommunity,
+  createProposal,
+} = require("./db");
 
-// publica a proposal no grupo e DM votantes
-async function publishDraft(adminId, groupId, draft) {
-  const comm = communities[groupId];
+// Publish draft proposal to group and notify voters
+async function publishDraft(adminId, chatId, draft) {
+  const comm = await getCommunity(chatId);
   if (!comm) return;
 
-  const newProposal = {
-    id: comm.proposalCounter++,
-    title: draft.title,
-    options: draft.options,
-    votes: {},
-    voterMap: {},
-    status: "open",
-    quorumWeight: draft.quorumWeight,
-    endsAt: draft.endsAt,
-    createdBy: adminId,
-    attachmentFileId: draft.attachmentFileId,
-    attachmentFileName: draft.attachmentFileName,
-  };
-  comm.proposals.push(newProposal);
+  // Generate unique proposal ID: chatId_timestamp
+  const proposalId = `c${chatId}_p${Date.now()}`;
 
-  // 1. attachment
-  if (newProposal.attachmentFileId) {
+  // Create proposal in database
+  const newProposal = await createProposal(
+    proposalId,
+    chatId,
+    draft.title,
+    draft.description || "",
+    draft.options,
+    adminId
+  );
+
+  if (!newProposal) {
     try {
-      await bot.api.sendDocument(groupId, newProposal.attachmentFileId, {
-        caption:
-          `📎 Reference for Proposal #${newProposal.id}: "${newProposal.title}"\n` +
-          (newProposal.attachmentFileName ? `(${newProposal.attachmentFileName})` : ""),
-      });
+      await bot.api.sendMessage(adminId, "❌ Failed to create proposal.");
     } catch (e) {}
+    return;
   }
 
-  // 2. announce
+  // 1. Announce in group
   const announce =
     `🗳 Voting is now OPEN: "${newProposal.title}"\n\n` +
     newProposal.options.map((opt, idx) => `• ${idx + 1}. ${opt}`).join("\n") +
-    "\n\n" +
-    (newProposal.endsAt
-      ? "⏳ Closes at: " + new Date(newProposal.endsAt).toISOString() + "\n"
-      : "") +
-    (newProposal.quorumWeight !== null
-      ? `Quorum required: ${newProposal.quorumWeight}\n`
-      : "") +
-    "\nI will DM approved voters now.";
+    "\n\nI will DM approved voters now.";
+  
   try {
-    await bot.api.sendMessage(groupId, announce);
-  } catch (e) {}
-
-  // 3. DM voters
-  const { formatProposalForDM, buildVoteDMKeyboard } = require("./proposalFlows");
-  for (const [uidStr, voter] of Object.entries(comm.voters)) {
-    const uid = Number(uidStr);
-    if (!voter.approved || !voter.weight) continue;
-    const introDM = formatProposalForDM(newProposal, voter.weight);
-    try {
-      await bot.api.sendMessage(uid, introDM, {
-        reply_markup: buildVoteDMKeyboard(groupId, newProposal),
-      });
-    } catch (e) {}
+    await bot.api.sendMessage(chatId, announce);
+  } catch (e) {
+    console.error("Failed to announce in group:", e);
   }
 
-  // 4. DM admin confirm
+  // 2. DM approved voters
+  const { formatProposalForDM, buildVoteDMKeyboard } = require("./proposalFlows");
+  const voters = await getApprovedVotersInCommunity(chatId);
+  
+  for (const voter of voters) {
+    if (!voter.approved || !voter.weight) continue;
+    
+    const introDM = formatProposalForDM(newProposal, voter.weight);
+    try {
+      await bot.api.sendMessage(voter.telegram_id, introDM, {
+        reply_markup: buildVoteDMKeyboard(proposalId, newProposal.options),
+      });
+    } catch (e) {
+      console.error(`Failed to DM voter ${voter.telegram_id}:`, e);
+    }
+  }
+
+  // 3. Confirm to admin
   try {
     await bot.api.sendMessage(
       adminId,
@@ -93,11 +90,11 @@ function registerDMMessageHandler() {
     const isDoc = !!ctx.message?.document;
     const isText = typeof ctx.message?.text === "string";
 
-    // (1) fluxo /setweight
+    // (1) /setweight flow
     if (privateChat && pendingSetWeight[fromId]) {
       const flow = pendingSetWeight[fromId];
 
-      // ASK_WEIGHT
+      // ASK_WEIGHT step
       if (flow.step === "ASK_WEIGHT" && isText) {
         const newWeight = parseInt(ctx.message.text.trim(), 10);
         if (isNaN(newWeight) || newWeight <= 0) {
@@ -108,32 +105,30 @@ function registerDMMessageHandler() {
         return ctx.reply("Reason for this change? (or 'skip')");
       }
 
-      // ASK_REASON
+      // ASK_REASON step
       if (flow.step === "ASK_REASON" && isText) {
         const reasonRaw = ctx.message.text.trim();
         const reason = reasonRaw.toLowerCase() === "skip" ? "unspecified" : reasonRaw;
         const { groupId, targetUserId, newWeight } = flow;
-        const comm = communities[groupId];
-        if (!comm || !isAdmin(comm, fromId)) {
+        
+        const comm = await getCommunity(groupId);
+        if (!comm || comm.admin_id !== fromId) {
           delete pendingSetWeight[fromId];
           return ctx.reply("Flow cancelled (not admin anymore).");
         }
-        const voter = comm.voters[targetUserId];
+        
+        const voter = await getVoter(groupId, targetUserId);
         if (!voter) {
           delete pendingSetWeight[fromId];
           return ctx.reply("User not found.");
         }
 
-        voter.approved = true;
-        voter.weight = newWeight;
-        voter.processed = true;
-        voter.lastChangeReason = reason;
-        voter.lastModifiedAt = new Date().toISOString();
-
+        // Update weight
+        await setVoterWeight(groupId, targetUserId, newWeight);
         delete pendingSetWeight[fromId];
 
         await ctx.reply(
-          `✅ Updated ${voter.username} in "${comm.title}". New weight: ${newWeight}. Reason: ${reason}`
+          `✅ Updated ${voter.username || voter.first_name || 'user'} in "${comm.title}". New weight: ${newWeight}. Reason: ${reason}`
         );
 
         try {
@@ -146,25 +141,23 @@ function registerDMMessageHandler() {
       }
     }
 
-    // (2) fluxo de custom weight primeira aprovação
+    // (2) Custom weight flow (first approval)
     if (isText && pendingCustomWeight[fromId]) {
       const { groupId, targetUserId } = pendingCustomWeight[fromId];
-      const comm = communities[groupId];
-      if (!comm || !isAdmin(comm, fromId)) {
+      const comm = await getCommunity(groupId);
+      
+      if (!comm || comm.admin_id !== fromId) {
         delete pendingCustomWeight[fromId];
       } else {
         const wNum = parseInt(ctx.message.text.trim(), 10);
         if (!isNaN(wNum) && wNum > 0) {
-          const voter = comm.voters[targetUserId];
-          if (voter && !voter.processed) {
-            voter.approved = true;
-            voter.weight = wNum;
-            voter.processed = true;
-            voter.lastChangeReason = "initial approval (custom)";
-            voter.lastModifiedAt = new Date().toISOString();
+          const voter = await getVoter(groupId, targetUserId);
+          if (voter && !voter.approved) {
+            await approveVoter(groupId, targetUserId);
+            await setVoterWeight(groupId, targetUserId, wNum);
 
             await ctx.reply(
-              `✅ Approved ${voter.username} in "${comm.title}" with weight ${wNum}.`
+              `✅ Approved ${voter.username || voter.first_name || 'user'} in "${comm.title}" with weight ${wNum}.`
             );
 
             try {
@@ -184,11 +177,11 @@ function registerDMMessageHandler() {
       }
     }
 
-    // (3) fluxo /new (draft)
+    // (3) /new flow (draft proposal)
     if (privateChat && draftProposal[fromId]) {
       const draft = draftProposal[fromId];
 
-      // TITLE
+      // TITLE step
       if (draft.step === "TITLE" && isText) {
         draft.title = ctx.message.text.trim();
         draft.step = "OPTIONS";
@@ -197,7 +190,7 @@ function registerDMMessageHandler() {
         );
       }
 
-      // OPTIONS
+      // OPTIONS step
       if (draft.step === "OPTIONS" && isText) {
         const opts = ctx.message.text
           .split(",")
@@ -207,62 +200,18 @@ function registerDMMessageHandler() {
           return ctx.reply("Need at least 2 options.");
         }
         draft.options = opts;
-        draft.step = "QUORUM";
-        return ctx.reply(
-          "Quorum (total weight) or 'skip'?\nExample: 30"
-        );
-      }
-
-      // QUORUM
-      if (draft.step === "QUORUM" && isText) {
-        const txt = ctx.message.text.trim().toLowerCase();
-        if (txt === "skip") {
-          draft.quorumWeight = null;
-        } else {
-          const q = parseInt(txt, 10);
-          if (isNaN(q) || q <= 0) {
-            return ctx.reply("Quorum must be number or 'skip'.");
-          }
-          draft.quorumWeight = q;
-        }
-        draft.step = "DURATION";
-        return ctx.reply("Duration (minutes)? Example: 60");
-      }
-
-      // DURATION
-      if (draft.step === "DURATION" && isText) {
-        const dur = parseInt(ctx.message.text.trim(), 10);
-        if (isNaN(dur) || dur <= 0) {
-          return ctx.reply("Duration must be positive minutes.");
-        }
-        draft.endsAt = Date.now() + dur * 60 * 1000;
-        draft.step = "ATTACHMENT";
-        return ctx.reply("Send attachment now or 'skip'.");
-      }
-
-      // ATTACHMENT
-      if (draft.step === "ATTACHMENT") {
-        if (isDoc) {
-          draft.attachmentFileId = ctx.message.document.file_id;
-          draft.attachmentFileName = ctx.message.document.file_name || null;
-        } else if (isText && ctx.message.text.trim().toLowerCase() === "skip") {
-          draft.attachmentFileId = null;
-          draft.attachmentFileName = null;
-        } else {
-          return ctx.reply("Send a file or type 'skip'.");
-        }
-
-        // escolher comunidade
-        const adminComms = adminsCommunities[fromId];
-        if (!adminComms || adminComms.size === 0) {
+        draft.step = "CHOOSE_COMMUNITY";
+        
+        // Get admin communities
+        const adminComms = await getAllCommunitiesForAdmin(fromId);
+        if (!adminComms || adminComms.length === 0) {
           delete draftProposal[fromId];
           return ctx.reply("You are not admin of any community anymore.");
         }
 
-        draft.step = "CHOOSE_COMMUNITY";
         const kb = new InlineKeyboard();
-        for (const [gid, meta] of adminComms.entries()) {
-          kb.text(`Publish to: ${meta.title}`, `publish_${gid}`).row();
+        for (const comm of adminComms) {
+          kb.text(`Publish to: ${comm.title}`, `publish_${comm.chat_id}`).row();
         }
         return ctx.reply("Which community should receive this proposal?", {
           reply_markup: kb,
@@ -271,11 +220,12 @@ function registerDMMessageHandler() {
     }
   });
 
-  // callback publish
+  // Callback: publish proposal to community
   bot.callbackQuery(/publish_(-?\d+)/, async (ctx) => {
-    const groupId = Number(ctx.match[1]);
+    const chatId = Number(ctx.match[1]);
     const adminId = ctx.from.id;
     const draft = draftProposal[adminId];
+    
     if (!draft || draft.step !== "CHOOSE_COMMUNITY") {
       return ctx.answerCallbackQuery({ text: "No active draft.", show_alert: true });
     }
@@ -283,7 +233,7 @@ function registerDMMessageHandler() {
     await ctx.answerCallbackQuery({ text: "Publishing..." });
     delete draftProposal[adminId];
 
-    await publishDraft(adminId, groupId, draft);
+    await publishDraft(adminId, chatId, draft);
   });
 }
 

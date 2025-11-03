@@ -1,21 +1,17 @@
 // backend/state.js
+// TEMPORARY workflow state (not persisted)
+// All persistent data (communities, voters, proposals, votes, wallets) is now in PostgreSQL (see db.js)
 
-// tudo EM MEMÓRIA por enquanto
-const communities = {};
-const adminsCommunities = {};
-const pendingCustomWeight = {};
-const draftProposal = {};
-const waitingMyVoteSelection = {};
-const pendingSetWeight = {};
+// Temporary state for multi-step workflows
+const pendingCustomWeight = {}; // Admin choosing custom weight during approval
+const draftProposal = {}; // Admin creating a new proposal (title, options, etc.)
+const waitingMyVoteSelection = {}; // User selecting which proposal to vote on
+const pendingSetWeight = {}; // Admin changing voter weight (multi-step)
 
 // Wallet creation state tokens (Map for better expiration handling)
 const pendingWalletStates = new Map();
 
-// Note: User wallets are now stored in PostgreSQL (see db.js)
-
 module.exports = {
-  communities,
-  adminsCommunities,
   pendingCustomWeight,
   draftProposal,
   waitingMyVoteSelection,

@@ -1,46 +1,42 @@
 // backend/proposalFlows.js
+// Handles proposal (ballot) creation, voting, and closing
 const { InlineKeyboard } = require("grammy");
 const bot = require("./bot");
+const { draftProposal, waitingMyVoteSelection } = require("./state");
+const { isPrivateChat, popup, safeDM } = require("./utils");
 const {
-  communities,
-  adminsCommunities,
-  draftProposal,
-  waitingMyVoteSelection,
-} = require("./state");
-const {
-  isPrivateChat,
-  popup,
-  safeDM,
-} = require("./utils");
-const {
-  isAdmin,
-  autoCloseExpiredProposals,
-  isProposalOpenForVoting,
-} = require("./community");
+  getCommunity,
+  getAllCommunitiesForAdmin,
+  getVoter,
+  getApprovedVotersInCommunity,
+  createProposal,
+  getProposal,
+  getOpenProposalsForCommunity,
+  closeProposal,
+  castVote,
+  getVote,
+  getAllVotesForProposal,
+} = require("./db");
 
-// format DM proposal
+// Format proposal for DM
 function formatProposalForDM(proposal, voterWeight) {
-  const deadlineText = proposal.endsAt
-    ? `Voting closes at: ${new Date(proposal.endsAt).toISOString()}\n`
-    : "";
   const weightText = voterWeight != null ? `Your voting weight: ${voterWeight}\n` : "";
   return (
-    `🗳 Proposal #${proposal.id}: "${proposal.title}"\n\n` +
-    deadlineText +
+    `🗳 Proposal "${proposal.title}"\n\n` +
     weightText +
     "Tap to cast or change your vote:\n"
   );
 }
 
-function buildVoteDMKeyboard(groupId, proposal) {
+function buildVoteDMKeyboard(proposalId, options) {
   const kb = new InlineKeyboard();
-  proposal.options.forEach((opt, idx) => {
-    kb.text(opt, `dmvote_${groupId}_${proposal.id}_${idx}`).row();
+  options.forEach((opt, idx) => {
+    kb.text(opt, `dmvote_${proposalId}_${idx}`).row();
   });
   return kb;
 }
 
-// /new
+// /new - Create new proposal
 function registerNewCommand() {
   bot.command("new", async (ctx) => {
     if (!isPrivateChat(ctx)) {
@@ -48,26 +44,25 @@ function registerNewCommand() {
     }
 
     const adminId = ctx.from.id;
-    const adminComms = adminsCommunities[adminId];
-    if (!adminComms || adminComms.size === 0) {
+    const adminComms = await getAllCommunitiesForAdmin(adminId);
+    
+    if (!adminComms || adminComms.length === 0) {
       return ctx.reply("You are not admin of any community.");
     }
 
     draftProposal[adminId] = {
       step: "TITLE",
+      chatId: null,
       title: "",
+      description: "",
       options: [],
-      quorumWeight: null,
-      endsAt: null,
-      attachmentFileId: null,
-      attachmentFileName: null,
     };
 
     await ctx.reply("📝 Proposal title?");
   });
 }
 
-// /close
+// /close - Close proposal and show results
 function registerCloseCommand() {
   bot.command("close", async (ctx) => {
     if (!isPrivateChat(ctx)) {
@@ -75,28 +70,22 @@ function registerCloseCommand() {
     }
 
     const adminId = ctx.from.id;
-    const adminComms = adminsCommunities[adminId];
-    if (!adminComms || adminComms.size === 0) {
+    const adminComms = await getAllCommunitiesForAdmin(adminId);
+    
+    if (!adminComms || adminComms.length === 0) {
       return ctx.reply("You don't administer any community.");
     }
 
     const kb = new InlineKeyboard();
     let foundAny = false;
 
-    for (const [gidStr, meta] of adminComms.entries()) {
-      const gid = Number(gidStr);
-      const comm = communities[gid];
-      if (!comm) continue;
-      if (!isAdmin(comm, adminId)) continue;
-
-      await autoCloseExpiredProposals(gid);
-
-      comm.proposals.forEach((p) => {
-        if (isProposalOpenForVoting(p)) {
-          foundAny = true;
-          kb.text(`Close #${p.id} (${meta.title})`, `admclose_${gid}_${p.id}`).row();
-        }
-      });
+    for (const comm of adminComms) {
+      const openProposals = await getOpenProposalsForCommunity(comm.chat_id);
+      
+      for (const p of openProposals) {
+        foundAny = true;
+        kb.text(`Close "${p.title}" (${comm.title})`, `admclose_${p.id}`).row();
+      }
     }
 
     if (!foundAny) {
@@ -108,191 +97,99 @@ function registerCloseCommand() {
     });
   });
 
-  // callback close
-  bot.callbackQuery(/admclose_(-?\d+)_(-?\d+)/, async (ctx) => {
-    const groupId = Number(ctx.match[1]);
-    const proposalId = Number(ctx.match[2]);
+  // Callback to close proposal
+  bot.callbackQuery(/admclose_(.+)/, async (ctx) => {
+    const proposalId = ctx.match[1];
 
-    const comm = communities[groupId];
-    if (!comm) return popup(ctx, "Community not found.");
-    if (!isAdmin(comm, ctx.from.id)) return popup(ctx, "Not admin.");
-
-    await autoCloseExpiredProposals(groupId);
-
-    const proposal = comm.proposals.find((p) => p.id === proposalId);
+    const proposal = await getProposal(proposalId);
     if (!proposal) return popup(ctx, "Proposal not found.");
+    
+    const comm = await getCommunity(proposal.chat_id);
+    if (!comm) return popup(ctx, "Community not found.");
+    if (comm.admin_id !== ctx.from.id) return popup(ctx, "Not admin.");
+
     if (proposal.status === "closed") return popup(ctx, "Already closed.");
 
-    // reusa finalize do community
-    const { finalizeProposal } = require("./community");
-    await ctx.answerCallbackQuery({ text: "Closing..." });
-    await finalizeProposal(comm, groupId, proposal);
+    // Close the proposal
+    await closeProposal(proposalId);
 
+    // Get all votes
+    const votes = await getAllVotesForProposal(proposalId);
+    
+    // Calculate results
+    const results = {};
+    proposal.options.forEach((opt, idx) => {
+      results[idx] = 0;
+    });
+
+    for (const vote of votes) {
+      results[vote.option_index] = (results[vote.option_index] || 0) + vote.weight_at_vote_time;
+    }
+
+    // Format results message
+    let resultText = `🔒 Voting closed for: "${proposal.title}"\n\nResults:\n`;
+    proposal.options.forEach((opt, idx) => {
+      const voteCount = results[idx] || 0;
+      resultText += `• ${opt}: ${voteCount}\n`;
+    });
+
+    // Post to group
+    try {
+      await bot.api.sendMessage(proposal.chat_id, resultText);
+    } catch (e) {
+      console.error("Failed to post results to group:", e);
+    }
+
+    await ctx.answerCallbackQuery({ text: "Closed!" });
     await safeDM(
       ctx.from.id,
-      `🔒 Proposal #${proposal.id} (“${proposal.title}”) closed.`
+      `🔒 Proposal "${proposal.title}" closed and results posted.`
     );
   });
 }
 
-// /myvote
+// /myvote - See and change your votes
 function registerMyVoteCommand() {
   bot.command("myvote", async (ctx) => {
     if (!isPrivateChat(ctx)) {
       return ctx.reply("Use /myvote in DM.");
     }
 
-    const txt = ctx.message.text.trim();
-    const parts = txt.split(/\s+/);
-
-    if (parts.length >= 2) {
-      const proposalId = Number(parts[1]);
-      if (isNaN(proposalId)) {
-        return ctx.reply("Usage:\n/myvote\nor\n/myvote <proposalId>");
-      }
-      await handleMyVoteDetail(ctx, ctx.from.id, proposalId);
-      return;
-    }
-
-    const kb = buildMyVoteKeyboardForUser(ctx.from.id);
-    if (!kb) {
-      return ctx.reply("No open proposals for you right now.");
-    }
-
-    waitingMyVoteSelection[ctx.from.id] = true;
-    await ctx.reply("Choose a proposal to review/change:", {
-      reply_markup: kb,
-    });
-  });
-
-  // callback myvote
-  bot.callbackQuery(/myvote_(-?\d+)_(-?\d+)/, async (ctx) => {
-    const groupId = Number(ctx.match[1]);
-    const proposalId = Number(ctx.match[2]);
     const userId = ctx.from.id;
-
-    if (!waitingMyVoteSelection[userId]) {
-      return popup(ctx, "Run /myvote first.");
-    }
-
-    await ctx.answerCallbackQuery();
-    await handleMyVoteDetail(ctx, userId, proposalId);
+    
+    // This needs to query all communities where user is an approved voter
+    // Then get all open proposals for those communities
+    // For now, simplified version:
+    
+    waitingMyVoteSelection[userId] = true;
+    await ctx.reply(
+      "To vote:\n\n" +
+      "1. Make sure you're approved in a group (send /join)\n" +
+      "2. Wait for admin to create a proposal\n" +
+      "3. I'll send you a DM with voting options\n\n" +
+      "If there's an active vote, you should have received a message already."
+    );
   });
 }
 
-function buildMyVoteKeyboardForUser(userId) {
-  const { communities } = require("./state");
-  const kb = new InlineKeyboard();
-  let foundAny = false;
-
-  for (const [gidStr, comm] of Object.entries(communities)) {
-    const gid = Number(gidStr);
-    const voter = comm.voters[userId];
-    if (!voter || !voter.approved || !voter.weight) continue;
-
-    comm.proposals.forEach((p) => {
-      if (isProposalOpenForVoting(p)) {
-        foundAny = true;
-        kb.text(`#${p.id} ${p.title}`, `myvote_${gid}_${p.id}`).row();
-      }
-    });
-  }
-
-  return foundAny ? kb : null;
-}
-
-async function handleMyVoteDetail(ctx, userId, proposalId) {
-  const { communities } = require("./state");
-  let foundComm = null;
-  let foundProposal = null;
-  let foundGroupId = null;
-
-  for (const [gidStr, comm] of Object.entries(communities)) {
-    const gid = Number(gidStr);
-    const voter = comm.voters[userId];
-    if (!voter || !voter.approved || !voter.weight) continue;
-
-    const p = comm.proposals.find((x) => x.id === proposalId);
-    if (!p) continue;
-
-    foundComm = comm;
-    foundProposal = p;
-    foundGroupId = gid;
-    break;
-  }
-
-  if (!foundProposal) {
-    return ctx.reply("Proposal not found for you.");
-  }
-
-  await autoCloseExpiredProposals(foundGroupId);
-  if (!isProposalOpenForVoting(foundProposal)) {
-    return ctx.reply("This proposal is closed.");
-  }
-
-  const voter = foundComm.voters[userId];
-  const weight = voter.weight || 0;
-  const currentIdx = foundProposal.voterMap[userId];
-  const currentChoice = currentIdx !== undefined
-    ? foundProposal.options[currentIdx]
-    : "(no vote yet)";
-
-  const kb = new InlineKeyboard();
-  foundProposal.options.forEach((opt, idx) => {
-    kb.text(opt, `dmvote_${foundGroupId}_${foundProposal.id}_${idx}`).row();
-  });
-
-  await ctx.reply(
-    `Proposal #${foundProposal.id}: "${foundProposal.title}"\n` +
-      `Your current vote: ${currentChoice}\n` +
-      `Your weight: ${weight}\n\n` +
-      "Tap to change:",
-    { reply_markup: kb }
-  );
-}
-
-// votar mesmo (callback)
+// Vote callback (when user clicks option)
 function registerDMVoteCallback() {
-  const {
-    communities,
-  } = require("./state");
-  const {
-    autoCloseExpiredProposals,
-    isProposalOpenForVoting,
-  } = require("./community");
-
-  bot.callbackQuery(/dmvote_(-?\d+)_(-?\d+)_(\d+)/, async (ctx) => {
-    const groupId = Number(ctx.match[1]);
-    const proposalId = Number(ctx.match[2]);
-    const optionIdx = Number(ctx.match[3]);
+  bot.callbackQuery(/dmvote_(.+)_(\d+)/, async (ctx) => {
+    const proposalId = ctx.match[1];
+    const optionIdx = Number(ctx.match[2]);
     const userId = ctx.from.id;
 
-    const comm = communities[groupId];
-    if (!comm) return popup(ctx, "Community not found.");
-
-    await autoCloseExpiredProposals(groupId);
-
-    const proposal = comm.proposals.find((p) => p.id === proposalId);
+    const proposal = await getProposal(proposalId);
     if (!proposal) return popup(ctx, "Proposal not found.");
-    if (!isProposalOpenForVoting(proposal)) return popup(ctx, "Voting closed.");
+    if (proposal.status !== "open") return popup(ctx, "Voting closed.");
 
-    const voter = comm.voters[userId];
+    const voter = await getVoter(proposal.chat_id, userId);
     if (!voter || !voter.approved || !voter.weight) {
-      return popup(ctx, "You are not approved here.");
+      return popup(ctx, "You are not approved to vote here.");
     }
 
-    // remove voto anterior
-    if (proposal.voterMap[userId] !== undefined) {
-      const oldIdx = proposal.voterMap[userId];
-      proposal.votes[oldIdx] =
-        (proposal.votes[oldIdx] || 0) - voter.weight;
-      if (proposal.votes[oldIdx] < 0) proposal.votes[oldIdx] = 0;
-    }
-
-    // adiciona novo
-    proposal.voterMap[userId] = optionIdx;
-    proposal.votes[optionIdx] =
-      (proposal.votes[optionIdx] || 0) + voter.weight;
+    // Cast vote (will update if already voted)
+    await castVote(proposalId, userId, optionIdx, voter.weight);
 
     await ctx.answerCallbackQuery({ text: "✅ Vote counted" });
 
