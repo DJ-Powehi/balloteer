@@ -112,7 +112,7 @@ function registerDMMessageHandler() {
         const { groupId, targetUserId, newWeight } = flow;
         
         const comm = await getCommunity(groupId);
-        if (!comm || comm.admin_id !== fromId) {
+        if (!comm || Number(comm.admin_id) !== Number(fromId)) {
           delete pendingSetWeight[fromId];
           return ctx.reply("Flow cancelled (not admin anymore).");
         }

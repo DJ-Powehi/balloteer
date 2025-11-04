@@ -106,7 +106,7 @@ function registerCloseCommand() {
     
     const comm = await getCommunity(proposal.chat_id);
     if (!comm) return popup(ctx, "Community not found.");
-    if (comm.admin_id !== ctx.from.id) return popup(ctx, "Not admin.");
+    if (Number(comm.admin_id) !== Number(ctx.from.id)) return popup(ctx, "Not admin.");
 
     if (proposal.status === "closed") return popup(ctx, "Already closed.");
 

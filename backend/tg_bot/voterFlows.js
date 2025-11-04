@@ -179,7 +179,10 @@ function registerApproveRejectCallbacks() {
 
     const comm = await getCommunity(groupId);
     if (!comm) return popup(ctx, "Community not found.");
-    if (comm.admin_id !== ctx.from.id) return popup(ctx, "Not admin.");
+    // Convert to Number for comparison (admin_id from DB might be string)
+    if (Number(comm.admin_id) !== Number(ctx.from.id)) {
+      return popup(ctx, "Not admin.");
+    }
 
     const voter = await getVoter(groupId, targetUserId);
     if (!voter) return popup(ctx, "User not found.");
@@ -207,7 +210,10 @@ function registerApproveRejectCallbacks() {
 
     const comm = await getCommunity(groupId);
     if (!comm) return popup(ctx, "Community not found.");
-    if (comm.admin_id !== ctx.from.id) return popup(ctx, "Not admin.");
+    // Convert to Number for comparison (admin_id from DB might be string)
+    if (Number(comm.admin_id) !== Number(ctx.from.id)) {
+      return popup(ctx, "Not admin.");
+    }
 
     const voter = await getVoter(groupId, targetUserId);
     if (!voter) return popup(ctx, "User not found.");
@@ -229,7 +235,10 @@ function registerApproveRejectCallbacks() {
 
     const comm = await getCommunity(groupId);
     if (!comm) return popup(ctx, "Community not found.");
-    if (comm.admin_id !== ctx.from.id) return popup(ctx, "Not admin.");
+    // Convert to Number for comparison (admin_id from DB might be string)
+    if (Number(comm.admin_id) !== Number(ctx.from.id)) {
+      return popup(ctx, "Not admin.");
+    }
 
     const voter = await getVoter(groupId, targetUserId);
     if (!voter) return popup(ctx, "User not found.");
@@ -288,7 +297,7 @@ function registerSetWeightFlow() {
     const groupId = Number(ctx.match[1]);
     const comm = await getCommunity(groupId);
     if (!comm) return popup(ctx, "Community not found.");
-    if (comm.admin_id !== adminId) return popup(ctx, "Not admin.");
+    if (Number(comm.admin_id) !== Number(adminId)) return popup(ctx, "Not admin.");
 
     flow.groupId = groupId;
     flow.step = "CHOOSE_USER";
