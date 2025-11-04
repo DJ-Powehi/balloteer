@@ -15,6 +15,7 @@ const {
   setVoterWeight,
   getAllVotersInCommunity,
   getApprovedVotersInCommunity,
+  getVotersByTelegramId,
 } = require("./db");
 
 // /start
@@ -107,27 +108,64 @@ function registerJoinCommand() {
     }
 
     const userId = ctx.from.id;
+    const username = ctx.from.username || ctx.from.first_name || "User";
     
-    // Get all voters where this user is registered
-    const allVoters = await getAllVotersInCommunity(userId); // This won't work, we need a different approach
-    
-    // Actually, we need to find all communities first, then check if user is in them
-    // For now, let's iterate through all communities where the user might be
-    // This is inefficient, but we can optimize later with a better query
-    
-    // Get all communities (we'll need to add a function for this)
-    // For now, let's just notify the user that we need them to be in a group first
-    
-    await ctx.reply(
-      "✅ To request voting access:\n\n" +
-      "1. Make sure the bot is in your group\n" +
-      "2. Send /start in that group\n" +
-      "3. Then come back here and send /join again\n\n" +
-      "The admin will be notified of your request."
-    );
-    
-    // TODO: Properly implement this by querying all communities where user is a voter
-    // For now, we'll keep a simple version that works with the existing flow
+    try {
+      // Get all communities where this user is registered
+      const voterRows = await getVotersByTelegramId(userId);
+      
+      if (voterRows.length === 0) {
+        return ctx.reply(
+          "❌ You're not registered in any community yet.\n\n" +
+          "To join:\n" +
+          "1. Ask admin to add me to your group\n" +
+          "2. Have admin send /start in the group\n" +
+          "3. Try /join again"
+        );
+      }
+      
+      let notifiedAny = false;
+      
+      for (const voterRow of voterRows) {
+        const chatId = voterRow.chat_id;
+        
+        // Skip if already approved
+        if (voterRow.approved) continue;
+        
+        const comm = await getCommunity(chatId);
+        if (!comm || !comm.admin_id) continue;
+        
+        // Send approval request to admin
+        const kb = new InlineKeyboard()
+          .text("Approve (1)", `approve_${chatId}_${userId}_1`).row()
+          .text("Approve (3)", `approve_${chatId}_${userId}_3`).row()
+          .text("Approve (custom)", `custom_${chatId}_${userId}`).row()
+          .text("Reject", `reject_${chatId}_${userId}`);
+        
+        await safeDM(
+          comm.admin_id,
+          "🔔 New voter request:\n" +
+            `Community: ${comm.title} (id ${chatId})\n` +
+            `User: ${ctx.from.username ? "@" + ctx.from.username : username}\n` +
+            `ID: ${userId}\n\nChoose:`,
+          { reply_markup: kb }
+        );
+        notifiedAny = true;
+      }
+      
+      if (notifiedAny) {
+        await ctx.reply("✅ Request sent to admins. You'll be notified if approved.");
+      } else {
+        await ctx.reply(
+          "ℹ️ You're already approved in all groups, or admins haven't been set yet.\n\n" +
+          "Use /myvote to see open proposals."
+        );
+      }
+      
+    } catch (error) {
+      console.error("Error in /join command:", error);
+      await ctx.reply("❌ An error occurred. Please try again later.");
+    }
   });
 }
 

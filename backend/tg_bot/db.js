@@ -333,6 +333,20 @@ async function getApprovedVotersInCommunity(chatId) {
   }
 }
 
+async function getVotersByTelegramId(telegramId) {
+  if (!pool) return [];
+  try {
+    const result = await pool.query(
+      'SELECT * FROM voters WHERE telegram_id = $1 ORDER BY created_at ASC',
+      [telegramId]
+    );
+    return result.rows;
+  } catch (error) {
+    console.error('❌ Error fetching voters by telegram ID:', error);
+    return [];
+  }
+}
+
 // ============================================
 // PROPOSAL FUNCTIONS
 // ============================================
@@ -491,6 +505,7 @@ module.exports = {
   setVoterWeight,
   getAllVotersInCommunity,
   getApprovedVotersInCommunity,
+  getVotersByTelegramId,
   // Proposal functions
   createProposal,
   getProposal,
